@@ -30,7 +30,7 @@ pip install torch numpy sounddevice faster-whisper pyserial
 Ensure you have the following:
 - Place your `mayday.pdf` in the correct path and update the path in the script:
   ```python
-  pdf_file = os.path.abspath("C:/Users/YourUsername/Desktop/main/whisper/mayday/mayday.pdf")
+  pdf_file = os.path.abspath("mayday.pdf")
   ```
 - Update your **serial port**:
   ```python
@@ -61,26 +61,20 @@ Once started:
 - Upon hearing "mayday" 2–3 times, it sends `"start"` to the Arduino and activates emergency mode.
 - Then listens for keywords to open relevant PDF manual pages.
 
-### 📦 Arduino Integration
+---
 
-The script sends the string `"start\n"` over serial to your Arduino. Example Arduino sketch:
-```cpp
-void setup() {
-  Serial.begin(9600);
-  pinMode(13, OUTPUT); // Built-in LED
-}
+## 📦 Arduino Integration
 
-void loop() {
-  if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-    if (command == "start") {
-      digitalWrite(13, HIGH);  // Indicate emergency
-      delay(3000);
-      digitalWrite(13, LOW);
-    }
-  }
-}
-```
+The Python script sends the string `"start\n"` over serial to your Arduino when emergency mode is triggered.
+
+✅ Check the `arduino_code.ino` file in this repo for the full sketch.
+
+Basic functionality:
+- Activates a relay or buzzer when `"start"` is received.
+- Sends SMS alerts to emergency contacts using a GSM module.
+- Supports manual override using a button.
+
+---
 
 ### 🧠 Model Info
 
