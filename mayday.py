@@ -1,175 +1,215 @@
-import threading
-import queue
-import tempfile
-import os
-import sys
-import time
 import torch
-import whisper
 import numpy as np
 import sounddevice as sd
-from datetime import datetime
+from faster_whisper import WhisperModel
+import threading
+import queue
+import time
+import subprocess
+import os
+import platform
+import webbrowser
+import serial  # For serial communication
 
-# Configuration
-SAMPLE_RATE = 16000
-CHANNELS = 1
-DEVICE = "pulse"  # Set to None to use default device
-CHUNK_DURATION = 3  # seconds
-LANGUAGE = "en"  # Change to your language code
+# Load a smaller, faster Whisper model for better responsiveness
+model = WhisperModel("medium.en", device="cuda" if torch.cuda.is_available() else "cpu", compute_type="float16")
 
-class LiveTranscriber:
-    def __init__(self):
-        self.audio_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.recording = False
-        self.full_transcript = []
-        
-        # Set up device
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {self.device}")
-        
-        # Load the Whisper medium model with half-precision to save VRAM
-        print("Loading Whisper medium model...")
-        self.model = whisper.load_model("small", device=self.device)
-        print("Model loaded!")
-        
-        # Create output directory
-        self.output_dir = "transcripts"
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Create temporary directory for audio chunks
-        self.temp_dir = tempfile.mkdtemp()
-        
-    def audio_callback(self, indata, frames, time, status):
-        """This is called for each audio block."""
-        if status:
-            print(f"Audio callback status: {status}")
-        if self.recording:
-            self.audio_queue.put(indata.copy())
-            
-    def process_audio(self):
-        """Process audio from the queue and transcribe it."""
-        while self.recording:
-            if not self.audio_queue.empty():
-                # Get audio data
-                audio_data = self.audio_queue.get()
-                
-                # Save to temporary file
-                temp_file = os.path.join(self.temp_dir, f"chunk_{time.time()}.wav")
-                
-                # Convert from float32 to int16
-                audio_data_int = (audio_data * 32767).astype(np.int16)
-                
-                import soundfile as sf
-                sf.write(temp_file, audio_data_int, SAMPLE_RATE)
-                
-                # Transcribe
-                try:
-                    options = {
-                        "fp16": True,
-                        "language": LANGUAGE,
-                        "task": "transcribe",
-                    }
-                    
-                    result = self.model.transcribe(temp_file, **options)
-                    transcript = result["text"].strip()
-                    
-                    if transcript:
-                        self.result_queue.put(transcript)
-                        self.full_transcript.append(transcript)
-                        
-                        # Print the transcript
-                        print(f"\nTranscript: {transcript}")
-                    
-                    # Clean up temporary file
-                    os.remove(temp_file)
-                    
-                except Exception as e:
-                    print(f"Error transcribing audio: {e}")
-            
-            else:
-                # If no audio in queue, sleep briefly to prevent CPU spinning
-                time.sleep(0.1)
-                
-    def start(self):
-        """Start recording and transcribing."""
-        self.recording = True
-        
-        # Start the processing thread
-        self.process_thread = threading.Thread(target=self.process_audio)
-        self.process_thread.daemon = True
-        self.process_thread.start()
-        
-        print("\nStarting live transcription...")
-        print("Press Ctrl+C to stop recording\n")
-        
-        # Start recording
-        try:
-            with sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                callback=self.audio_callback,
-                blocksize=int(SAMPLE_RATE * CHUNK_DURATION),
-                device=DEVICE
-            ):
-                # Keep main thread alive
-                while self.recording:
-                    time.sleep(0.1)
-        except KeyboardInterrupt:
-            self.stop()
-        except Exception as e:
-            print(f"Error in audio stream: {e}")
-            self.stop()
-            
-    def stop(self):
-        """Stop recording and save the transcript."""
-        print("\nStopping transcription...")
-        self.recording = False
-        
-        # Wait for processing to complete
-        if hasattr(self, 'process_thread') and self.process_thread.is_alive():
-            self.process_thread.join(timeout=2)
-            
-        # Save full transcript
-        if self.full_transcript:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = os.path.join(self.output_dir, f"transcript_{timestamp}.txt")
-            
-            with open(output_file, "w") as f:
-                f.write("\n".join(self.full_transcript))
-                
-            print(f"\nFull transcript saved to: {output_file}")
+# Audio parameters - shorter block for faster response
+samplerate = 16000
+channels = 1
+block_duration = 1.5  # Reduced for faster response
+buffer_duration = 0.3
+
+# Create a queue for audio blocks
+audio_queue = queue.Queue()
+running = True
+
+# Emergency mode flag
+emergency_mode_active = False
+
+# PDF file path - use absolute path for reliability
+pdf_file = os.path.abspath("C:/Users/amann/Desktop/main/whisper/mayday/mayday.pdf")  # Update this path to the location of your PDF
+
+# Serial port settings
+SERIAL_PORT = "COM9"  # Change this to match your Arduino's port (e.g., "/dev/ttyUSB0" or "/dev/cu.usbmodemXXXX")
+BAUD_RATE = 9600  # Must match Arduino's baud rate
+
+# Open serial connection at the start of the program
+ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+
+def send_serial_message(message):
+    try:
+        ser.write((message + "\n").encode())  # Append newline for Arduino
+        print(f"Sent to Arduino: {message}")
+    except Exception as e:
+        print(f"Error sending serial message: {e}")
+
+
+
+def open_pdf_at_page(pdf_path, page_number):
+    """
+    Open the PDF file at the specified page using Foxit Reader (if available),
+    or fallback to the default PDF viewer.
+    """
+    try:
+        if not os.path.exists(pdf_path):
+            print(f"Error: PDF file '{pdf_path}' not found.")
+            return False
+
+        foxit_path = r"C:\Program Files (x86)\Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe"
+        if os.path.exists(foxit_path):
+            subprocess.run([foxit_path, "/A", f"page={page_number}", pdf_path])
         else:
-            print("\nNo transcript to save.")
-            
-        # Clean up temp directory
-        try:
-            import shutil
-            shutil.rmtree(self.temp_dir)
-        except Exception as e:
-            print(f"Error cleaning up temp directory: {e}")
+            print("⚠️ Foxit Reader not found. Opening in default browser...")
+            webbrowser.open(pdf_path)
 
-def list_audio_devices():
-    """List all available audio input devices."""
-    print("\nAvailable audio input devices:")
-    devices = sd.query_devices()
-    for i, device in enumerate(devices):
-        if device['max_input_channels'] > 0:
-            print(f"[{i}] {device['name']} (Inputs: {device['max_input_channels']})")
-    print()
+        print(f"\n{'*' * 50}")
+        print(f"📖 Opening PDF at page {page_number} using Foxit Reader")
+        print(f"{'*' * 50}\n")
+
+        return True
+    except Exception as e:
+        print(f"Error opening PDF: {e}")
+        return False
+
+
+
+
+def open_pdf_at_page(pdf_path, page_number):
+    """
+    Open the PDF file at the specified page using an HTML wrapper.
+    """
+    try:
+        if not os.path.exists(pdf_path):
+            print(f"Error: PDF file '{pdf_path}' not found.")
+            return False
+        
+        # Create HTML wrapper that embeds the PDF and navigates to the page
+        html_path = create_pdf_html_wrapper(pdf_path, page_number)
+        
+        # Open the HTML file in the default browser
+        html_url = f"file://{os.path.abspath(html_path)}"
+        webbrowser.open(html_url)
+        
+        # Display confirmation in console
+        print(f"\n{'*' * 50}")
+        print(f"EMERGENCY! Opening PDF at page {page_number}")
+        print(f"{'*' * 50}\n")
+        
+        return True
+    except Exception as e:
+        print(f"Error opening PDF: {e}")
+        return False
+
+def audio_callback(indata, frames, time_info, status):
+    """Callback function for the audio stream."""
+    if status:
+        print(f"Stream status: {status}")
+    # Add audio data to the queue
+    audio_queue.put(indata.copy())
+
+def process_audio():
+    """Process audio blocks from the queue."""
+    global running, emergency_mode_active
+    
+    # Buffer to store audio that overlaps between processing blocks
+    audio_buffer = np.zeros(0, dtype=np.float32)
+    
+    while running:
+        # Collect audio data until we have enough for processing
+        while not audio_queue.empty():
+            new_audio = audio_queue.get()
+            audio_buffer = np.append(audio_buffer, np.squeeze(new_audio))
+        
+        # If we have enough audio data to process
+        if len(audio_buffer) >= (block_duration * samplerate):
+            # Extract the block to process
+            process_length = int(block_duration * samplerate)
+            audio_to_process = audio_buffer[:process_length]
+            
+            # Keep a small buffer for overlap to avoid cutting words
+            retain_samples = int(buffer_duration * samplerate)
+            audio_buffer = audio_buffer[process_length - retain_samples:]
+            
+            # Use beam_size=1 and best_of=1 for faster processing
+            segments, info = model.transcribe(audio_to_process, vad_filter=True, 
+                                              beam_size=1, best_of=1)
+            transcription = "".join(segment.text for segment in segments).strip()
+            
+            if transcription:
+                print(f"Heard: {transcription}")
+                transcription_lower = transcription.lower()
+                
+                # If already in emergency mode, listen for specific emergency keywords
+                if emergency_mode_active:
+                    if "runway" in transcription_lower:
+                        page = 1
+                        print(f"\n🛫 RUNWAY EMERGENCY DETECTED - Opening procedure manual page {page}")
+                        open_pdf_at_page(pdf_file, page)
+                        emergency_mode_active = False  # Reset emergency mode
+                        
+                    elif "engine failure" in transcription_lower or "engine" in transcription_lower:
+                        page = 2
+                        print(f"\n🔧 ENGINE FAILURE DETECTED - Opening procedure manual page {page}")
+                        open_pdf_at_page(pdf_file, page)
+                        emergency_mode_active = False  # Reset emergency mode
+                        
+                    elif ("descending" in transcription_lower and "rapidly" in transcription_lower) or \
+                         ("descending" in transcription_lower and "rapidly" in transcription_lower) or \
+                         "descending rapidly" in transcription_lower or "Descending rapidly" in transcription_lower:
+                        page = 3
+                        print(f"\n💥 NOSE CONE CRASH DETECTED - Opening procedure manual page {page}")
+                        open_pdf_at_page(pdf_file, page)
+                        emergency_mode_active = False  # Reset emergency mode
+                        
+                # Check for "mayday" repeated three times (or leniently two times) to activate emergency mode
+                elif transcription_lower.count("mayday") >= 3 or "mayday mayday mayday" in transcription_lower or "may day may day may day" in transcription_lower or "mayday mayday" in transcription_lower:
+                    print("\n🚨 EMERGENCY PROTOCOL ACTIVATED - MAYDAY SEQUENCE DETECTED 🚨")
+                    print("Sending emergency signal to Arduino...")
+                    
+                    send_serial_message("start")  # Send "start" to Arduino
+                    
+                    print("Listening for emergency type... (runway, engine failure, or nose cone crash)")
+                    emergency_mode_active = True
+        
+        # Short sleep to prevent CPU overuse
+        time.sleep(0.05)
+
+def main():
+    global running
+    
+    print("Live Mayday Emergency Detector with PDF Navigation")
+    print("-------------------------------------------------")
+    print("Listening for audio... Say 'mayday mayday mayday' to activate emergency protocol.")
+    print("Then specify the emergency type:")
+    print("  - Say 'runway' to open emergency manual page 1")
+    print("  - Say 'engine failure' to open emergency manual page 2")
+    print("  - Say 'nose cone crash' to open emergency manual page 3")
+    print(f"PDF file location: {pdf_file}")
+    print("Press Ctrl+C to stop.")
+    
+    # Start the audio processing thread
+    process_thread = threading.Thread(target=process_audio)
+    process_thread.daemon = True
+    process_thread.start()
+    
+    try:
+        # Start the audio stream with a shorter block size for faster response
+        block_size = int(samplerate * 0.05)  # 50ms blocks for lower latency
+        with sd.InputStream(callback=audio_callback, channels=channels, 
+                            samplerate=samplerate, dtype='float32',
+                            blocksize=block_size):
+            print("Stream started. Speak into the microphone...")
+            # Keep the main thread alive
+            while True:
+                time.sleep(0.1)
+    
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    finally:
+        running = False
+        process_thread.join(timeout=1.0)
+        print("Program terminated.")
 
 if __name__ == "__main__":
-    # List available audio devices
-    list_audio_devices()
-    
-    # Ask user to select a device
-    try:
-        device_id = input("Enter device number to use (or press Enter for default): ").strip()
-        if device_id:
-            DEVICE = int(device_id)
-    except ValueError:
-        print("Invalid device ID, using default device.")
-        DEVICE = None
-    
-    transcriber = LiveTranscriber()
-    transcriber.start()
+    main()
