@@ -28,7 +28,7 @@ running = True
 emergency_mode_active = False
 
 # PDF file path - use absolute path for reliability
-pdf_file = os.path.abspath("C:/Users/amann/Desktop/main/whisper/mayday/mayday.pdf")  # Update this path to the location of your PDF
+pdf_file = os.path.abspath("mayday.pdf")  # Update this path to the location of your PDF
 
 # Serial port settings
 SERIAL_PORT = "COM9"  # Change this to match your Arduino's port (e.g., "/dev/ttyUSB0" or "/dev/cu.usbmodemXXXX")
